@@ -1,4 +1,4 @@
-# Scan-to-Booklet
+# Booklet Reorder
 
 Convert scanned saddle-stitched booklet PDFs into properly ordered pages for duplex printing.
 
