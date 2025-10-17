@@ -8,7 +8,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="booklet-reorder",
-    version="1.0.0",
+    version="1.1.0",
     author="Michael Greiner",
     description="Convert scanned saddle-stitched booklet PDFs into properly ordered pages for duplex printing",
     long_description=long_description,
@@ -21,6 +21,8 @@ setup(
         "PyPDF2>=3.0.0",
         "PyMuPDF>=1.23.0",
         "Pillow>=10.0.0",
+        "opencv-python>=4.8.0",
+        "numpy>=1.24.0",
     ],
     entry_points={
         "console_scripts": [

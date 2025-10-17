@@ -13,6 +13,7 @@ For a saddle-stitched booklet scanned sequentially:
 """
 
 import argparse
+import io
 import sys
 from pathlib import Path
 
@@ -20,10 +21,80 @@ try:
     import PyPDF2
     from PIL import Image
     import fitz  # PyMuPDF
+    import cv2
+    import numpy as np
 except ImportError as e:
     print(f"Error: Missing required library. Please install dependencies:")
     print("  pip install -r requirements.txt")
     sys.exit(1)
+
+
+def remove_center_shadow(image, shadow_width_percent=0.15, strength=1.5):
+    """
+    Remove shadow from the center seam of a scanned booklet page.
+
+    Uses LAB color space to preserve colors while removing shadows.
+    Only processes the center region where the booklet seam shadow appears.
+
+    Args:
+        image: numpy array (BGR format from cv2)
+        shadow_width_percent: width of center region to process (as fraction of image width)
+        strength: shadow removal strength (1.0 = normal, higher = more aggressive)
+
+    Returns:
+        numpy array: image with center shadow reduced
+    """
+    if image is None or image.size == 0:
+        return image
+
+    # Convert BGR to LAB color space
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+
+    # Calculate the center region to process
+    height, width = image.shape[:2]
+    center_x = width // 2
+    shadow_width = int(width * shadow_width_percent)
+    left_bound = max(0, center_x - shadow_width // 2)
+    right_bound = min(width, center_x + shadow_width // 2)
+
+    # Extract the center region
+    center_region = l_channel[:, left_bound:right_bound].copy()
+
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to the L channel
+    # This brightens dark areas (shadows) while preserving local contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0 * strength, tileGridSize=(8, 8))
+    center_enhanced = clahe.apply(center_region)
+
+    # Create a smooth blend mask to avoid hard edges
+    blend_width = shadow_width // 4  # Width of the blending region
+    mask = np.ones((height, right_bound - left_bound), dtype=np.float32)
+
+    # Create left edge gradient
+    if blend_width > 0:
+        for i in range(blend_width):
+            alpha = i / blend_width
+            mask[:, i] = alpha
+
+        # Create right edge gradient
+        for i in range(blend_width):
+            alpha = i / blend_width
+            mask[:, -(i+1)] = alpha
+
+    # Blend the enhanced center with the original
+    center_blended = (center_enhanced * mask + center_region * (1 - mask)).astype(np.uint8)
+
+    # Replace the center region in the L channel
+    l_channel_corrected = l_channel.copy()
+    l_channel_corrected[:, left_bound:right_bound] = center_blended
+
+    # Merge channels back
+    lab_corrected = cv2.merge([l_channel_corrected, a_channel, b_channel])
+
+    # Convert back to BGR
+    result = cv2.cvtColor(lab_corrected, cv2.COLOR_LAB2BGR)
+
+    return result
 
 
 def split_page_vertical(page, pdf_writer):
@@ -83,18 +154,55 @@ def reorder_booklet_pages(input_pdf_path, output_pdf_path):
         width = rect.width
         height = rect.height
 
+        # Render page to image for shadow removal
+        mat = fitz.Matrix(2.0, 2.0)  # 2x resolution for better quality
+        pix = page.get_pixmap(matrix=mat)
+
+        # Convert PyMuPDF pixmap to numpy array
+        img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+
+        # Convert RGBA to BGR if needed (OpenCV uses BGR)
+        if pix.n == 4:  # RGBA
+            img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGBA2BGR)
+        elif pix.n == 3:  # RGB
+            img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = img_data
+
+        # Apply shadow removal to the center seam
+        img_corrected = remove_center_shadow(img_bgr, shadow_width_percent=0.15, strength=1.5)
+
+        # Convert back to RGB for PIL/PyMuPDF
+        img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
+
+        # Convert numpy array back to PIL Image
+        pil_image = Image.fromarray(img_rgb)
+
+        # Create a new temporary PDF with the corrected image
+        temp_doc = fitz.open()
+        temp_page = temp_doc.new_page(width=width, height=height)
+
+        # Save PIL image to bytes and insert into PDF
+        img_bytes = io.BytesIO()
+        pil_image.save(img_bytes, format='PNG')
+        img_bytes.seek(0)
+
+        # Insert image into the page
+        temp_page.insert_image(temp_page.rect, stream=img_bytes.read())
+
         # Create two new pages for left and right halves
         # Left half
         left_doc = fitz.open()
         left_page = left_doc.new_page(width=width/2, height=height)
-        left_page.show_pdf_page(left_page.rect, doc, i, clip=fitz.Rect(0, 0, width/2, height))
+        left_page.show_pdf_page(left_page.rect, temp_doc, 0, clip=fitz.Rect(0, 0, width/2, height))
 
         # Right half
         right_doc = fitz.open()
         right_page = right_doc.new_page(width=width/2, height=height)
-        right_page.show_pdf_page(right_page.rect, doc, i, clip=fitz.Rect(width/2, 0, width, height))
+        right_page.show_pdf_page(right_page.rect, temp_doc, 0, clip=fitz.Rect(width/2, 0, width, height))
 
         all_split_pages.append((left_doc, right_doc))
+        temp_doc.close()
 
     print(f"\nSplit all pages successfully")
 
