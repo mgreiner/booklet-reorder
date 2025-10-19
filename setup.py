@@ -8,7 +8,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="booklet-reorder",
-    version="1.1.0",
+    version="1.1.1",
     author="Michael Greiner",
     description="Convert scanned saddle-stitched booklet PDFs into properly ordered pages for duplex printing",
     long_description=long_description,

@@ -29,12 +29,12 @@ except ImportError as e:
     sys.exit(1)
 
 
-def remove_center_shadow(image, shadow_width_percent=0.15, strength=1.5):
+def remove_center_shadow(image, shadow_width_percent=0.20, strength=2.5):
     """
     Remove shadow from the center seam of a scanned booklet page.
 
-    Uses LAB color space to preserve colors while removing shadows.
-    Only processes the center region where the booklet seam shadow appears.
+    Uses illumination correction to normalize brightness across the page.
+    This method is better for deep shadows than histogram equalization.
 
     Args:
         image: numpy array (BGR format from cv2)
@@ -47,7 +47,7 @@ def remove_center_shadow(image, shadow_width_percent=0.15, strength=1.5):
     if image is None or image.size == 0:
         return image
 
-    # Convert BGR to LAB color space
+    # Convert BGR to LAB color space to preserve colors
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
 
@@ -58,34 +58,52 @@ def remove_center_shadow(image, shadow_width_percent=0.15, strength=1.5):
     left_bound = max(0, center_x - shadow_width // 2)
     right_bound = min(width, center_x + shadow_width // 2)
 
-    # Extract the center region
-    center_region = l_channel[:, left_bound:right_bound].copy()
+    # Estimate the illumination using morphological operations
+    # This creates a "background" that represents the uneven lighting
+    kernel_size = max(15, int(width * 0.05))  # Adaptive kernel size
+    if kernel_size % 2 == 0:
+        kernel_size += 1  # Must be odd
 
-    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to the L channel
-    # This brightens dark areas (shadows) while preserving local contrast
-    clahe = cv2.createCLAHE(clipLimit=2.0 * strength, tileGridSize=(8, 8))
-    center_enhanced = clahe.apply(center_region)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
-    # Create a smooth blend mask to avoid hard edges
-    blend_width = shadow_width // 4  # Width of the blending region
+    # Dilate to get the bright background
+    dilated = cv2.dilate(l_channel, kernel, iterations=1)
+
+    # Apply median blur to smooth the illumination map
+    bg_illumination = cv2.medianBlur(dilated, kernel_size)
+
+    # Normalize the L channel by dividing by the background illumination
+    # This removes the shadow by equalizing the lighting
+    l_normalized = np.float32(l_channel) / (np.float32(bg_illumination) + 1)
+    l_normalized = np.clip(l_normalized * 255 * strength, 0, 255).astype(np.uint8)
+
+    # Only apply correction to center region
+    l_channel_corrected = l_channel.copy()
+
+    # Create a smooth blend mask with Gaussian falloff
+    blend_width = shadow_width // 3
     mask = np.ones((height, right_bound - left_bound), dtype=np.float32)
 
-    # Create left edge gradient
+    # Create smooth gradients on edges
     if blend_width > 0:
-        for i in range(blend_width):
-            alpha = i / blend_width
-            mask[:, i] = alpha
+        # Left edge
+        x_left = np.arange(blend_width).astype(np.float32)
+        alpha_left = 0.5 * (1 - np.cos(np.pi * x_left / blend_width))  # Cosine gradient
+        mask[:, :blend_width] = alpha_left[np.newaxis, :]
 
-        # Create right edge gradient
-        for i in range(blend_width):
-            alpha = i / blend_width
-            mask[:, -(i+1)] = alpha
+        # Right edge
+        x_right = np.arange(blend_width).astype(np.float32)
+        alpha_right = 0.5 * (1 - np.cos(np.pi * (blend_width - x_right) / blend_width))
+        mask[:, -blend_width:] = alpha_right[np.newaxis, :]
 
-    # Blend the enhanced center with the original
-    center_blended = (center_enhanced * mask + center_region * (1 - mask)).astype(np.uint8)
+    # Extract center regions
+    center_original = l_channel[:, left_bound:right_bound]
+    center_corrected = l_normalized[:, left_bound:right_bound]
 
-    # Replace the center region in the L channel
-    l_channel_corrected = l_channel.copy()
+    # Blend using the mask
+    center_blended = (center_corrected * mask + center_original * (1 - mask)).astype(np.uint8)
+
+    # Replace the center region
     l_channel_corrected[:, left_bound:right_bound] = center_blended
 
     # Merge channels back
